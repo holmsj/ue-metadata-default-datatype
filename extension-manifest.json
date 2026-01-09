@@ -1,0 +1,8 @@
+{
+  "name": "Asset metadata defaults (local dev)",
+  "id": "uixassetmetadatadefaults",
+  "description": "Universal Editor field renderer that defaults values from AEM Author asset metadata",
+  "version": "0.0.1"
+}
+
+

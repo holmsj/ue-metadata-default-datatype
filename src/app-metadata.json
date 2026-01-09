@@ -1,0 +1,9 @@
+{
+  "extensions": [
+    {
+      "extensionPoint": "universal-editor/ui/1"
+    }
+  ]
+}
+
+
