@@ -91,6 +91,14 @@ function tryExtractDamPath(value) {
   return "";
 }
 
+function normalizeAssetSignature(assetValue) {
+  const s = String(assetValue || "").trim();
+  if (!s) return "";
+  // DM delivery URLs tend to have noisy query params; ignore them for cache purposes.
+  if (s.startsWith("/adobe/dynamicmedia/deliver/")) return s.split("?")[0];
+  return s;
+}
+
 function findSelectedEditable(editorState) {
   const selected = editorState?.selected || {};
   const selectedIds = Object.keys(selected).filter((k) => selected[k]);
@@ -242,6 +250,9 @@ export default function AssetMetadataDefaultField() {
   const valueRef = useRef("");
   const cooldownUntilRef = useRef(0);
   const persistedDamCacheRef = useRef(new Map());
+  const tickCounterRef = useRef(0);
+  const lastTraceKeyRef = useRef("");
+  const lastTraceResolvedDamPathRef = useRef("");
 
   const config = useMemo(() => {
     return {
@@ -249,6 +260,11 @@ export default function AssetMetadataDefaultField() {
       metadataKey: model?.metadataKey || "dc:title",
     };
   }, [model]);
+
+  const trace = (...args) => {
+    // eslint-disable-next-line no-console
+    console.log("[ue-metadata-default]", ...args);
+  };
 
   useEffect(() => {
     if (!isEmbedded) {
@@ -291,6 +307,7 @@ export default function AssetMetadataDefaultField() {
 
     const interval = setInterval(() => {
       (async () => {
+        const tick = (tickCounterRef.current += 1);
         const now = Date.now();
         if (cooldownUntilRef.current && now < cooldownUntilRef.current) {
           return;
@@ -329,6 +346,7 @@ export default function AssetMetadataDefaultField() {
         const neighborProp = neighbor?.prop || "";
         const assetRawValue = String(getEditableValue(neighbor) || "").trim();
         const assetPath = assetRawValue;
+        const assetSignature = normalizeAssetSignature(assetRawValue);
 
         const token = connection.sharedContext?.get("token");
         const authScheme = connection.sharedContext?.get("authScheme") || "Bearer";
@@ -342,7 +360,8 @@ export default function AssetMetadataDefaultField() {
         }
         // If UE gives us a delivery URL (e.g. DM deliver), fall back to reading the persisted component JSON.
         if (!resolvedDamPath && urn?.path && aemHost) {
-          const cacheKey = `${aemHost}|${urn.path}|${config.assetField}`;
+          // Cache must be invalidated when the selected asset changes; include the current asset field value.
+          const cacheKey = `${aemHost}|${urn.path}|${config.assetField}|${assetSignature}`;
           const cached = persistedDamCacheRef.current.get(cacheKey);
           if (cached) {
             resolvedDamPath = cached;
@@ -387,16 +406,54 @@ export default function AssetMetadataDefaultField() {
           lastError: "",
         });
 
+        // Trace key changes (selection/asset/DAM changes) at high signal only.
+        const traceKey = [
+          selectedResource || "",
+          neighborProp || "",
+          assetSignature || "",
+          resolvedDamPath || "",
+        ].join("|");
+        if (traceKey && traceKey !== lastTraceKeyRef.current) {
+          lastTraceKeyRef.current = traceKey;
+          trace(
+            `tick=${tick}`,
+            `selectedResource=${selectedResource ? String(selectedResource).slice(0, 96) + "…" : "(none)"}`,
+            `assetField=${config.assetField}`,
+            `neighborProp=${neighborProp || "(none)"}`,
+            `assetSignature=${assetSignature || "(none)"}`,
+            `resolvedDamPath=${resolvedDamPath || "(none)"}`,
+            `currentAlt="${valueRef.current || ""}"`
+          );
+        }
+
         if (!resolvedDamPath || !resolvedDamPath.startsWith("/content/dam/")) return;
 
         const assetChanged = lastSeenAssetRef.current && lastSeenAssetRef.current !== resolvedDamPath;
         const shouldApply =
           assetChanged || (!valueRef.current && lastAppliedAssetRef.current !== resolvedDamPath);
 
+        if (resolvedDamPath !== lastTraceResolvedDamPathRef.current) {
+          lastTraceResolvedDamPathRef.current = resolvedDamPath;
+          trace(
+            `tick=${tick}`,
+            `decision assetChanged=${Boolean(assetChanged)}`,
+            `valueEmpty=${!valueRef.current}`,
+            `lastSeen=${lastSeenAssetRef.current || "(none)"}`,
+            `lastApplied=${lastAppliedAssetRef.current || "(none)"}`,
+            `shouldApply=${Boolean(shouldApply)}`
+          );
+        }
+
         lastSeenAssetRef.current = resolvedDamPath;
 
         if (!shouldApply) return;
 
+        trace(
+          `tick=${tick}`,
+          `APPLY start`,
+          `resolvedDamPath=${resolvedDamPath}`,
+          `metadataKey=${config.metadataKey}`
+        );
         setStatus({ state: "loading", message: `Fetching ${config.metadataKey}…` });
 
         const metadataJson = await fetchDamMetadataJson({
@@ -412,7 +469,20 @@ export default function AssetMetadataDefaultField() {
         if (cancelled) return;
 
         lastAppliedAssetRef.current = resolvedDamPath;
-        connection.host.field.onChange(metadataValue);
+        trace(
+          `tick=${tick}`,
+          `APPLY fetched`,
+          `metadataKeyResolved=${resolved.resolvedKey || "(none)"}`,
+          `metadataValue="${metadataValue}"`,
+          `metadataKeysSample=${keysSample || "(none)"}`
+        );
+
+        try {
+          connection.host.field.onChange(metadataValue);
+        } catch (e) {
+          trace(`tick=${tick}`, `APPLY onChange threw`, e);
+          throw e;
+        }
         setValue(metadataValue);
         valueRef.current = metadataValue;
         setDebug((d) => ({
@@ -426,6 +496,7 @@ export default function AssetMetadataDefaultField() {
             ? `Auto-filled from ${resolved.resolvedKey || config.metadataKey}`
             : `No value found for ${config.metadataKey}`,
         });
+        trace(`tick=${tick}`, `APPLY done`, `newAlt="${metadataValue}"`);
       })().catch((e) => {
         if (cancelled) return;
         console.error(e);
@@ -434,6 +505,7 @@ export default function AssetMetadataDefaultField() {
         setDebug((d) => ({ ...d, lastError: msg }));
         // Avoid spamming the author with repeated failing requests.
         cooldownUntilRef.current = Date.now() + 8000;
+        trace(`tick=${tickCounterRef.current}`, `ERROR`, msg);
       });
     }, tickMs);
 
