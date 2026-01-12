@@ -13,12 +13,16 @@ import {
 import { extensionId } from "./constants";
 import { getTraceLevel, trace, traceFn, summarize } from "./trace";
 
-// TEMP: Stability test. When enabled, the renderer does *no* UE host attachment, no editorState reads,
-// no event listening, and no network calls. It just renders placeholder UI.
-const STATIC_PLACEHOLDER_MODE = false;
-
-// Track last resolved DAM path for a given selected resource (per iframe session).
-// This survives React unmount/remount (which can happen frequently in UE) and avoids relying on localStorage.
+/**
+ * Module-singleton state for the iframe JS context.
+ *
+ * UE may unmount/remount the React tree frequently while keeping the same iframe JS context alive.
+ * Using a module-scope Map lets us preserve “previous asset” knowledge across those remounts without
+ * relying on localStorage (which is shared and can introduce cross-tab/session coupling).
+ *
+ * Key: `${selectedResource}|${assetField}`
+ * Value: last resolved DAM path for that selection.
+ */
 const lastDamPathBySelectionKey = new Map();
 
 /**
@@ -28,7 +32,15 @@ const lastDamPathBySelectionKey = new Map();
  */
 const normalizeProp = traceFn("normalizeProp", "all", function normalizeProp(prop) {
   if (!prop) return "";
-  return String(prop).replace(/^\//, "");
+  const s = String(prop).trim();
+  // UE props can vary by field type / serializer:
+  // - "image"
+  // - "/image"
+  // - "./image"
+  // Normalize these to a stable key.
+  if (s.startsWith("./")) return s.slice(2);
+  if (s.startsWith("/")) return s.slice(1);
+  return s;
 });
 
 /**
@@ -201,6 +213,20 @@ const resolveProp = traceFn("resolveProp", "all", function resolveProp(editable)
 });
 
 /**
+ * Return editables that share the same parent container as the selected editable.
+ * (This corresponds to “neighbor fields” within the same authored component instance.)
+ *
+ * @param {any[]} editables
+ * @param {any} selectedEditable
+ * @returns {any[]}
+ */
+function getSiblingEditables(editables, selectedEditable) {
+  const selectedParentId = selectedEditable?.parentid || selectedEditable?.id || "";
+  if (!selectedParentId) return [];
+  return (editables || []).filter((e) => (e?.parentid || "") === selectedParentId);
+}
+
+/**
  * Find the neighbor editable for a given field name (e.g. `image`) relative to the selected editable.
  * @param {any} editorState
  * @param {any} selectedEditable
@@ -214,15 +240,9 @@ const findNeighborEditable = traceFn(
     const editables = editorState?.editables || [];
     const editableById = new Map(editables.map((e) => [e.id, e]));
 
-    const selectedParentId = selectedEditable?.parentid || selectedEditable?.id || "";
     const want = normalizeProp(neighborFieldName);
 
-    const candidates = editables
-      .filter((e) => (e?.parentid || e?.id) && (e.parentid || e.id) && (e.parentid || e.id))
-      .filter((e) => {
-        const pid = e.parentid || "";
-        return pid === selectedParentId;
-      });
+    const candidates = getSiblingEditables(editables, selectedEditable);
 
     const inSameParent =
       candidates.find((e) => normalizeProp(resolveProp(e)) === want) ||
@@ -345,53 +365,22 @@ const fetchDamMetadataJson = traceFn(
   }
 );
 
-function StaticPlaceholderField() {
-  const isEmbedded = useMemo(() => window.self !== window.top, []);
-
-  if (!isEmbedded) {
-    return (
-      <Provider theme={lightTheme} colorScheme="light">
-        <View padding="size-100">
-          <Text>
-            Placeholder mode (not embedded). Load this inside Universal Editor.
-          </Text>
-        </View>
-      </Provider>
-    );
-  }
-
-  return (
-    <Provider theme={lightTheme} colorScheme="light">
-      <View padding="size-100">
-        <Flex direction="column" gap="size-100">
-          <Text>Placeholder mode: dynamic behavior disabled (stability test).</Text>
-
-          <TextField
-            label="Alt Text (placeholder)"
-            aria-label="Alt Text (placeholder)"
-            value="(static placeholder value)"
-            isReadOnly
-            width="100%"
-          />
-
-          <TextField
-            label="Status (placeholder)"
-            aria-label="Status (placeholder)"
-            value="No attach/editorState/events/network in this mode."
-            isReadOnly
-            width="100%"
-          />
-        </Flex>
-      </View>
-    </Provider>
-  );
-}
-
 function LiveAssetMetadataDefaultField() {
   /**
    * Component entrypoint for the `uix-asset-metadata-default` field renderer.
-   * The UE host loads this as an iframe; we attach to the host field and poll editorState
-   * to detect selection/asset changes.
+   *
+   * Data flow (production-hardened, but readable):
+   * - Attach to the UE host.
+   * - Read `editorState` on demand (not constant polling).
+   * - Find the selected component + the configured neighbor asset field (e.g. `image`).
+   * - Resolve the actual DAM path (often requires reading `<component>.json` because the field value
+   *   can be a Dynamic Media delivery URL even when the author selected `/content/dam/...`).
+   * - Decide whether to apply defaults (only when the asset changes / first selection), then fetch
+   *   DAM metadata and write the current field value.
+   *
+   * Robustness notes:
+   * - Host events can arrive before the new selection is persisted; we do short delayed retries.
+   * - We avoid “lags 1” by refusing to cache persisted DAM values that don’t match the new DM URL filename.
    */
   const isEmbedded = useMemo(() => window.self !== window.top, []);
   const [connection, setConnection] = useState(null);
@@ -432,6 +421,9 @@ function LiveAssetMetadataDefaultField() {
   // Debug UI is controlled by the same single flag as console tracing.
   // Any non-off value shows debug UI.
   const showDebug = useMemo(() => getTraceLevel() !== "off", []);
+
+  // UE field model supports `readOnly` (documented).
+  const isReadOnly = Boolean(model?.readOnly);
 
   const config = useMemo(() => {
     // Field model comes from UE; keep config defaults stable for v1.
@@ -535,8 +527,17 @@ function LiveAssetMetadataDefaultField() {
     }
 
     if (!resolvedDamPath && urn?.path && aemHost) {
-      const cacheKey = `${aemHost}|${urn.path}|${config.assetField}|${assetSignature}`;
-      const cached = persistedDamCacheRef.current.get(cacheKey);
+      // Cache the persisted DAM path only when we have a stable signature for the selection.
+      //
+      // Some components (notably the simple `image` block) may not expose the neighbor asset field as
+      // a UE editable we can read, so `assetSignature` can be empty. If we used the cache in that case,
+      // we'd key everything under the same cacheKey and “stick” to the first persisted DAM path forever.
+      const canUsePersistedCache = Boolean(assetSignature);
+      const cacheKey = canUsePersistedCache
+        ? `${aemHost}|${urn.path}|${config.assetField}|${assetSignature}`
+        : "";
+
+      const cached = canUsePersistedCache ? persistedDamCacheRef.current.get(cacheKey) : null;
       if (cached) {
         resolvedDamPath = cached;
       } else {
@@ -548,8 +549,9 @@ function LiveAssetMetadataDefaultField() {
           token,
         });
         const nextResolved = persisted.startsWith("/content/dam/") ? persisted : tryExtractDamPath(persisted);
+
         // IMPORTANT: `aue:content-patch` can fire before the new asset selection is persisted.
-        // In that case, `hero.json` can still return the previously persisted DAM path.
+        // In that case, `<component>.json` can still return the previously persisted DAM path.
         // If we cache that stale value under the *new* DM URL signature, retries will keep seeing
         // the old DAM path (off-by-one / "lags 1").
         //
@@ -571,7 +573,7 @@ function LiveAssetMetadataDefaultField() {
           });
           resolvedDamPath = "";
         } else {
-          if (nextResolved) {
+          if (canUsePersistedCache && nextResolved) {
             persistedDamCacheRef.current.set(cacheKey, nextResolved);
           }
           resolvedDamPath = nextResolved;
@@ -741,6 +743,7 @@ function LiveAssetMetadataDefaultField() {
 
   // Keep local state in sync when user edits.
   const onChange = (v) => {
+    if (isReadOnly) return;
     trace("tick", "AssetMetadataDefaultField:onChange", { value: summarize(v) });
     setValue(v);
     valueRef.current = v;
@@ -807,7 +810,8 @@ function LiveAssetMetadataDefaultField() {
             label={model?.label || model?.name || "Value"}
             aria-label={model?.label || model?.name || "Value"}
             value={value}
-            onChange={onChange}
+            isReadOnly={isReadOnly}
+            onChange={isReadOnly ? undefined : onChange}
             width="100%"
           />
 
@@ -862,7 +866,6 @@ function LiveAssetMetadataDefaultField() {
 }
 
 export default function AssetMetadataDefaultField() {
-  if (STATIC_PLACEHOLDER_MODE) return <StaticPlaceholderField />;
   return <LiveAssetMetadataDefaultField />;
 }
 
