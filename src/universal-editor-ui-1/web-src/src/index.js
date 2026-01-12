@@ -3,52 +3,40 @@ import "regenerator-runtime/runtime";
 
 // eslint-disable-next-line unicorn/prefer-module
 window.React = require("react");
+import React from "react";
 import ReactDOM from "react-dom";
 
-import Runtime, { init } from "@adobe/exc-app";
+import ExtensionRegistration from "./components/ExtensionRegistration";
+import AssetMetadataDefaultField from "./components/AssetMetadataDefaultField";
 
-import App from "./components/App";
+// De-SPA: avoid React Router and the Experience Cloud Shell runtime bootstrap in the renderer iframe.
+// UE loads this page in iframes and may mount/unmount quickly during startup; keep the entrypoint minimal and idempotent.
 
-try {
-  // attempt to load the Experience Cloud Runtime
-  // eslint-disable-next-line unicorn/prefer-module
-  require("./exc-runtime");
-  // if there are no errors, bootstrap the app in the Experience Cloud Shell
-  init(bootstrapInExcShell);
-} catch (e) {
-  // fallback mode, run the application without the Experience Cloud Runtime
-  // eslint-disable-next-line no-console
-  console.log("application not running in Adobe Experience Cloud Shell");
-  bootstrapRaw();
+function pickViewFromLocation() {
+  // We keep compatibility with existing renderer URLs like: /index.html#/asset-metadata-default
+  const hash = String(window.location.hash || "");
+  if (hash.includes("asset-metadata-default")) return "asset-metadata-default";
+  return "registration";
 }
 
-function bootstrapRaw() {
-  const mockRuntime = { on: () => {} };
-  const mockIms = {};
+function mountOnce() {
+  const root = document.getElementById("root");
+  if (!root) return;
 
-  ReactDOM.render(<App runtime={mockRuntime} ims={mockIms} />, document.getElementById("root"));
+  const view = pickViewFromLocation();
+
+  // Guard against double-boot (observed as multiple tick=1 logs).
+  const guardKey = `__UE_METADATA_DEFAULT_BOOTED__${view}`;
+  if (window[guardKey]) return;
+  window[guardKey] = true;
+
+  if (view === "asset-metadata-default") {
+    ReactDOM.render(<AssetMetadataDefaultField />, root);
+  } else {
+    ReactDOM.render(<ExtensionRegistration />, root);
+  }
 }
 
-function bootstrapInExcShell() {
-  const runtime = Runtime();
-
-  runtime.on("ready", ({ imsOrg, imsToken, imsProfile }) => {
-    runtime.done();
-    const ims = {
-      profile: imsProfile,
-      org: imsOrg,
-      token: imsToken,
-    };
-
-    ReactDOM.render(<App runtime={runtime} ims={ims} />, document.getElementById("root"));
-  });
-
-  runtime.solution = {
-    icon: "AdobeExperienceCloud",
-    title: "asset-metadata-defaults",
-    shortTitle: "asset-metadata-defaults",
-  };
-  runtime.title = "asset-metadata-defaults";
-}
+mountOnce();
 
 

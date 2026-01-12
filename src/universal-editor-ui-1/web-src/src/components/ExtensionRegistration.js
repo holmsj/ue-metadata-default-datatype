@@ -3,6 +3,9 @@ import { Text } from "@adobe/react-spectrum";
 import { register } from "@adobe/uix-guest";
 import { extensionId, rendererDataType } from "./constants";
 import metadata from "../../../../app-metadata.json";
+import { summarize } from "./trace";
+
+const LAST_UE_EVENT_KEY = "ue.assetMetadataDefaults.lastUeEvent";
 
 export default function ExtensionRegistration() {
   const isEmbedded = useMemo(() => window.self !== window.top, []);
@@ -16,8 +19,29 @@ export default function ExtensionRegistration() {
       await register({
         id: extensionId,
         metadata,
-        debug: true,
+        debug: false,
         methods: {
+          // Minimal event bridge (no console logging): forward host events to our renderer iframe
+          // via localStorage so the renderer can react without polling.
+          events: {
+            listen(eventName, data) {
+              try {
+                const payload = {
+                  ts: Date.now(),
+                  eventName: String(eventName || ""),
+                  data,
+                };
+                window.localStorage?.setItem(LAST_UE_EVENT_KEY, JSON.stringify(payload));
+              } catch {
+                // ignore
+              }
+              // TEMP: log events to console so we can validate the user flow while debugging.
+              // eslint-disable-next-line no-console
+              console.log("[ue-asset-metadata-defaults][events.listen]", String(eventName || ""), {
+                data: summarize(data),
+              });
+            },
+          },
           canvas: {
             getRenderers() {
               return [
