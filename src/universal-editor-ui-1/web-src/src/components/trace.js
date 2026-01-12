@@ -109,25 +109,26 @@ export function trace(level, event, details) {
 export function traceFn(name, level, fn) {
   // @ts-ignore - plain JS file, keep typing lightweight.
   return function tracedFn(...args) {
-    const enterSeq = trace(level, `${name}:enter`, { args: args.map(summarize) });
+    const enabled = isTraceEnabled(level);
+    const enterSeq = enabled ? trace(level, `${name}:enter`, { args: args.map(summarize) }) : undefined;
     try {
       const result = fn(...args);
       // Promise support (async functions).
       if (result && typeof result.then === "function") {
         return result
           .then((v) => {
-            trace(level, `${name}:exit`, { enterSeq, result: summarize(v) });
+            if (enabled) trace(level, `${name}:exit`, { enterSeq, result: summarize(v) });
             return v;
           })
           .catch((e) => {
-            trace(level, `${name}:error`, { enterSeq, message: String(e?.message || e) });
+            if (enabled) trace(level, `${name}:error`, { enterSeq, message: String(e?.message || e) });
             throw e;
           });
       }
-      trace(level, `${name}:exit`, { enterSeq, result: summarize(result) });
+      if (enabled) trace(level, `${name}:exit`, { enterSeq, result: summarize(result) });
       return result;
     } catch (e) {
-      trace(level, `${name}:error`, { enterSeq, message: String(e?.message || e) });
+      if (enabled) trace(level, `${name}:error`, { enterSeq, message: String(e?.message || e) });
       throw e;
     }
   };

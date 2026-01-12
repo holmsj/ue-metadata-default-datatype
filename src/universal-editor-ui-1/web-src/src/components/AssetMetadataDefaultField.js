@@ -429,8 +429,9 @@ function LiveAssetMetadataDefaultField() {
   const lastRunReasonRef = useRef("");
   const lastUeEventTsRef = useRef(0);
 
-  // TEMP: force debug UI ON while we validate event-driven updates.
-  const showDebug = true;
+  // Debug UI is controlled by the same single flag as console tracing.
+  // Any non-off value shows debug UI.
+  const showDebug = useMemo(() => getTraceLevel() !== "off", []);
 
   const config = useMemo(() => {
     // Field model comes from UE; keep config defaults stable for v1.
