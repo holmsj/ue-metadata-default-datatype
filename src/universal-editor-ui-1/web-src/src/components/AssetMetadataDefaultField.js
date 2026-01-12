@@ -17,6 +17,10 @@ import { getTraceLevel, trace, traceFn, summarize } from "./trace";
 // no event listening, and no network calls. It just renders placeholder UI.
 const STATIC_PLACEHOLDER_MODE = false;
 
+// Track last resolved DAM path for a given selected resource (per iframe session).
+// This survives React unmount/remount (which can happen frequently in UE) and avoids relying on localStorage.
+const lastDamPathBySelectionKey = new Map();
+
 /**
  * Normalize a UE `prop` identifier to a stable comparison key.
  * @param {string} prop
@@ -130,6 +134,18 @@ const tryExtractDamPath = traceFn("tryExtractDamPath", "all", function tryExtrac
   }
   return "";
 });
+
+/**
+ * Return the last path segment ("basename") of a URL/path (query stripped).
+ * Used to sanity-check that the persisted DAM path matches the selected DM URL.
+ * @param {string} s
+ * @returns {string}
+ */
+function basename(s) {
+  const v = String(s || "").split("?")[0];
+  const parts = v.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "";
+}
 
 /**
  * Normalize the neighbor asset value into a stable signature for caching decisions.
@@ -531,10 +547,34 @@ function LiveAssetMetadataDefaultField() {
           token,
         });
         const nextResolved = persisted.startsWith("/content/dam/") ? persisted : tryExtractDamPath(persisted);
-        if (nextResolved) {
-          persistedDamCacheRef.current.set(cacheKey, nextResolved);
+        // IMPORTANT: `aue:content-patch` can fire before the new asset selection is persisted.
+        // In that case, `hero.json` can still return the previously persisted DAM path.
+        // If we cache that stale value under the *new* DM URL signature, retries will keep seeing
+        // the old DAM path (off-by-one / "lags 1").
+        //
+        // Sanity-check convergence by comparing filenames:
+        // - DM delivery URL ends with `<fileName>`
+        // - persisted DAM path ends with `<fileName>`
+        // If they don't match, treat as "not converged yet" and wait for the next retry.
+        const dmName = basename(assetSignature);
+        const damName = basename(nextResolved);
+        const looksStale = Boolean(dmName && damName && dmName !== damName);
+        if (looksStale) {
+          trace("tick", `run=${seq}:persistedDam:notConverged`, {
+            reason,
+            dmName,
+            damName,
+            assetSignature,
+            persisted,
+            nextResolved,
+          });
+          resolvedDamPath = "";
+        } else {
+          if (nextResolved) {
+            persistedDamCacheRef.current.set(cacheKey, nextResolved);
+          }
+          resolvedDamPath = nextResolved;
         }
-        resolvedDamPath = nextResolved;
       }
     }
 
@@ -581,29 +621,40 @@ function LiveAssetMetadataDefaultField() {
 
     if (!resolvedDamPath || !resolvedDamPath.startsWith("/content/dam/")) return;
 
-    // IMPORTANT:
-    // On `aue:content-patch`, UE can briefly emit events before `editorState.get()` and/or the persisted
-    // component JSON reflect the *new* asset. During that window, `resolvedDamPath` can still point to
-    // the previous asset. If we treat that as "asset changed", we end up applying metadata for the
-    // previous selection (off-by-one lag).
-    //
-    // To avoid this, we only apply when the resolved DAM path differs from the last applied DAM path.
-    // This effectively waits until the system converges on the new persisted asset reference.
-
-    // If the field already has a value on first load, establish a baseline so we can detect changes.
-    if (!lastAppliedAssetRef.current && valueRef.current) {
-      lastAppliedAssetRef.current = resolvedDamPath;
-      trace("tick", `run=${seq}:baseline`, { reason, baselineDamPath: resolvedDamPath });
-      return;
+    // Determine whether the asset actually changed (vs an event firing before persisted state converges).
+    // We key by selected resource + assetField to survive UI remounts without using localStorage.
+    const selectionKey = `${selectedResource || ""}|${config.assetField}`;
+    const prevDamPath = lastDamPathBySelectionKey.get(selectionKey) || "";
+    const assetChanged = Boolean(prevDamPath) && prevDamPath !== resolvedDamPath;
+    if (!prevDamPath || assetChanged) {
+      lastDamPathBySelectionKey.set(selectionKey, resolvedDamPath);
     }
 
-    const shouldApply = lastAppliedAssetRef.current !== resolvedDamPath;
+    // Overwrite policy (Option B):
+    // - Only auto-fill when a NEW asset is selected (i.e. the neighbor asset field changes).
+    // - Do NOT auto-fill merely because the field is empty. Empty may be intentional.
+    //
+    // Event nuance:
+    // - The first time an author selects an asset, `prevDamPath` may be empty.
+    //   We treat that as a "selection" only when triggered by an actual content-patch event.
+    const isContentPatchEvent =
+      typeof reason === "string" &&
+      (reason.startsWith("ueEvent:aue:content-patch") || reason.startsWith("ueEvent:aue:content-details"));
+    const isFirstAssetSelection = !prevDamPath && Boolean(resolvedDamPath) && isContentPatchEvent;
+
+    // Only apply for a new (or first) selection, and only once per resolvedDamPath.
+    const shouldApply =
+      (assetChanged || isFirstAssetSelection) &&
+      lastAppliedAssetRef.current !== resolvedDamPath;
 
     if (resolvedDamPath !== lastTraceResolvedDamPathRef.current) {
       lastTraceResolvedDamPathRef.current = resolvedDamPath;
       trace("tick", `run=${seq}:decision`, {
         reason,
+        assetChanged,
+        isFirstAssetSelection,
         valueEmpty: !valueRef.current,
+        prevDamPath: prevDamPath || "(none)",
         lastApplied: lastAppliedAssetRef.current || "(none)",
         shouldApply: Boolean(shouldApply),
       });
