@@ -65,6 +65,23 @@ component property by fetching:
 
 - `<selectedResourcePath>.json` (e.g. `.../hero.json`) and reading the configured `assetField`
 
+### Dynamic Media OpenAPI (delivery domain) assets
+
+If the persisted value in `<component>.json` is an **OpenAPI delivery URL** like:
+
+- `https://delivery-<program>-<env>.adobeaemcloud.com/adobe/assets/urn:aaid:aem:<uuid>/original/as/<name>.<ext>`
+
+…then the renderer treats that as the source of truth and fetches metadata from:
+
+- `https://delivery-.../adobe/assets/urn:aaid:aem:<uuid>/metadata`
+
+The response typically contains `assetMetadata` (e.g. `dc:title`) and `repositoryMetadata`
+(e.g. `dc:format`, size). The renderer resolves your configured `metadataKey` against:
+
+- top-level keys, then
+- `assetMetadata`, then
+- `repositoryMetadata`
+
 ### UE eventual consistency (“lags 1”)
 
 Host events like `aue:content-patch` can fire **before** the newly selected asset is persisted,

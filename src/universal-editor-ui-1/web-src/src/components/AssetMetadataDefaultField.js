@@ -160,6 +160,33 @@ function basename(s) {
 }
 
 /**
+ * Attempt to extract an AEM asset URN from an OpenAPI delivery URL/string.
+ * Example: `urn:aaid:aem:<uuid>`
+ *
+ * @param {string} s
+ * @returns {string}
+ */
+function tryExtractAssetUrn(s) {
+  const v = String(s || "");
+  const m = v.match(/urn:aaid:aem:[0-9a-f-]+/i);
+  return (m && m[0]) || "";
+}
+
+/**
+ * If `s` is an absolute URL, return its origin; otherwise empty.
+ * @param {string} s
+ * @returns {string}
+ */
+function tryExtractOrigin(s) {
+  try {
+    const u = new URL(String(s || ""));
+    return u.origin || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Normalize the neighbor asset value into a stable signature for caching decisions.
  * @param {string} assetValue
  * @returns {string}
@@ -301,17 +328,27 @@ const resolveMetadataValue = traceFn(
     if (!metadataJson || typeof metadataJson !== "object") return { value: "", resolvedKey: "" };
     if (!requestedKey) return { value: "", resolvedKey: "" };
 
-    const keys = Object.keys(metadataJson);
-    const direct = metadataJson[requestedKey];
-    if (direct !== undefined) return { value: direct, resolvedKey: requestedKey };
+    // Many metadata sources:
+    // - AEM Author DAM metadata.json: keys at root (e.g. "dc:title")
+    // - Delivery OpenAPI /metadata: keys often under `assetMetadata` and `repositoryMetadata`
+    const sources = [metadataJson, metadataJson.assetMetadata, metadataJson.repositoryMetadata].filter(
+      (v) => v && typeof v === "object"
+    );
 
-    const wantedLower = String(requestedKey).toLowerCase();
-    const ciKey = keys.find((k) => String(k).toLowerCase() === wantedLower);
-    if (ciKey) return { value: metadataJson[ciKey], resolvedKey: ciKey };
+    // Search each source in order.
+    for (const src of sources) {
+      const keys = Object.keys(src);
+      const direct = src[requestedKey];
+      if (direct !== undefined) return { value: direct, resolvedKey: requestedKey };
 
-    const colonToUnderscore = String(requestedKey).replace(/:/g, "_");
-    const underscoreKey = keys.find((k) => String(k).toLowerCase() === colonToUnderscore.toLowerCase());
-    if (underscoreKey) return { value: metadataJson[underscoreKey], resolvedKey: underscoreKey };
+      const wantedLower = String(requestedKey).toLowerCase();
+      const ciKey = keys.find((k) => String(k).toLowerCase() === wantedLower);
+      if (ciKey) return { value: src[ciKey], resolvedKey: ciKey };
+
+      const colonToUnderscore = String(requestedKey).replace(/:/g, "_");
+      const underscoreKey = keys.find((k) => String(k).toLowerCase() === colonToUnderscore.toLowerCase());
+      if (underscoreKey) return { value: src[underscoreKey], resolvedKey: underscoreKey };
+    }
 
     return { value: "", resolvedKey: "" };
   }
@@ -365,6 +402,27 @@ const fetchDamMetadataJson = traceFn(
   }
 );
 
+/**
+ * Fetch metadata for an AEM asset delivered via Dynamic Media OpenAPI.
+ *
+ * @param {{deliveryOrigin: string, assetUrn: string}} params
+ * @returns {Promise<Record<string, any> | null>}
+ */
+const fetchDeliveryMetadataJson = traceFn(
+  "fetchDeliveryMetadataJson",
+  "all",
+  async function fetchDeliveryMetadataJson({ deliveryOrigin, assetUrn }) {
+    if (!deliveryOrigin || !assetUrn) return null;
+    const url = `${deliveryOrigin}/adobe/assets/${assetUrn}/metadata`;
+    // Delivery metadata is typically publicly readable (or authenticated via other means).
+    // Critically: many delivery responses use `Access-Control-Allow-Origin: *`, which is
+    // incompatible with `credentials: "include"` and will be blocked by the browser.
+    const res = await fetch(url, { credentials: "omit" });
+    if (!res.ok) throw new Error(`Delivery metadata fetch failed (${res.status}) for ${assetUrn}`);
+    return await res.json();
+  }
+);
+
 function LiveAssetMetadataDefaultField() {
   /**
    * Component entrypoint for the `uix-asset-metadata-default` field renderer.
@@ -409,7 +467,9 @@ function LiveAssetMetadataDefaultField() {
   const lastAppliedAssetRef = useRef(null);
   const valueRef = useRef("");
   const cooldownUntilRef = useRef(0);
-  const persistedDamCacheRef = useRef(new Map());
+  // Cache for the persisted asset value read from `<component>.json`.
+  // Keyed by selection + assetSignature when available (see runOnce).
+  const persistedAssetCacheRef = useRef(new Map());
   const tickCounterRef = useRef(0);
   const lastTraceKeyRef = useRef("");
   const lastTraceResolvedDamPathRef = useRef("");
@@ -519,27 +579,20 @@ function LiveAssetMetadataDefaultField() {
     const token = connection.sharedContext?.get("token");
     const authScheme = connection.sharedContext?.get("authScheme") || "Bearer";
 
-    let resolvedDamPath = "";
-    if (assetPath.startsWith("/content/dam/")) {
-      resolvedDamPath = assetPath.split("?")[0];
-    } else {
-      resolvedDamPath = tryExtractDamPath(assetPath);
-    }
-
-    if (!resolvedDamPath && urn?.path && aemHost) {
-      // Cache the persisted DAM path only when we have a stable signature for the selection.
-      //
-      // Some components (notably the simple `image` block) may not expose the neighbor asset field as
-      // a UE editable we can read, so `assetSignature` can be empty. If we used the cache in that case,
-      // we'd key everything under the same cacheKey and “stick” to the first persisted DAM path forever.
+    // Source of truth: persisted component property from `<component>.json` when available.
+    // (The editable value we see in editorState is sometimes a transformed delivery URL.)
+    let persistedAssetValue = "";
+    if (urn?.path && aemHost) {
+      // Cache the persisted value only when we have a stable signature for the selection.
+      // If `assetSignature` is empty, caching would “stick” forever under a constant key.
       const canUsePersistedCache = Boolean(assetSignature);
       const cacheKey = canUsePersistedCache
         ? `${aemHost}|${urn.path}|${config.assetField}|${assetSignature}`
         : "";
 
-      const cached = canUsePersistedCache ? persistedDamCacheRef.current.get(cacheKey) : null;
+      const cached = canUsePersistedCache ? persistedAssetCacheRef.current.get(cacheKey) : null;
       if (cached) {
-        resolvedDamPath = cached;
+        persistedAssetValue = cached;
       } else {
         const persisted = await fetchComponentProp({
           aemHost,
@@ -548,38 +601,43 @@ function LiveAssetMetadataDefaultField() {
           authScheme,
           token,
         });
-        const nextResolved = persisted.startsWith("/content/dam/") ? persisted : tryExtractDamPath(persisted);
 
-        // IMPORTANT: `aue:content-patch` can fire before the new asset selection is persisted.
-        // In that case, `<component>.json` can still return the previously persisted DAM path.
-        // If we cache that stale value under the *new* DM URL signature, retries will keep seeing
-        // the old DAM path (off-by-one / "lags 1").
-        //
-        // Sanity-check convergence by comparing filenames:
-        // - DM delivery URL ends with `<fileName>`
-        // - persisted DAM path ends with `<fileName>`
-        // If they don't match, treat as "not converged yet" and wait for the next retry.
+        // Same “lags 1” / eventual consistency issue applies: we may briefly read the previous value.
+        // Use filename convergence when we can (requires a non-empty assetSignature).
         const dmName = basename(assetSignature);
-        const damName = basename(nextResolved);
-        const looksStale = Boolean(dmName && damName && dmName !== damName);
+        const persistedName = basename(persisted);
+        const looksStale = Boolean(dmName && persistedName && dmName !== persistedName);
         if (looksStale) {
-          trace("tick", `run=${seq}:persistedDam:notConverged`, {
+          trace("tick", `run=${seq}:persistedAsset:notConverged`, {
             reason,
             dmName,
-            damName,
+            persistedName,
             assetSignature,
             persisted,
-            nextResolved,
           });
-          resolvedDamPath = "";
+          persistedAssetValue = "";
         } else {
-          if (canUsePersistedCache && nextResolved) {
-            persistedDamCacheRef.current.set(cacheKey, nextResolved);
+          if (canUsePersistedCache && persisted) {
+            persistedAssetCacheRef.current.set(cacheKey, persisted);
           }
-          resolvedDamPath = nextResolved;
+          persistedAssetValue = persisted;
         }
       }
     }
+
+    // Resolve from persisted value first, then fall back to what editorState exposed.
+    const assetValue = String((persistedAssetValue || assetPath) || "").trim();
+
+    const deliveryOrigin = tryExtractOrigin(assetValue);
+    const assetUrn = tryExtractAssetUrn(assetValue);
+
+    let resolvedDamPath = "";
+    if (assetValue.startsWith("/content/dam/")) {
+      resolvedDamPath = assetValue.split("?")[0];
+    } else {
+      resolvedDamPath = tryExtractDamPath(assetValue);
+    }
+    const resolvedAssetRef = resolvedDamPath || assetUrn || "";
 
     const siblingProps = (editorState?.editables || [])
       .filter((e) => (e?.parentid || "") === (selectedEditable.parentid || selectedEditable.id || ""))
@@ -608,7 +666,7 @@ function LiveAssetMetadataDefaultField() {
       });
     }
 
-    const traceKey = [selectedResource || "", neighborProp || "", assetSignature || "", resolvedDamPath || ""].join("|");
+    const traceKey = [selectedResource || "", neighborProp || "", assetSignature || "", resolvedAssetRef || ""].join("|");
     if (traceKey && traceKey !== lastTraceKeyRef.current) {
       lastTraceKeyRef.current = traceKey;
       trace("tick", `run=${seq}:stateChanged`, {
@@ -618,19 +676,20 @@ function LiveAssetMetadataDefaultField() {
         neighborProp: neighborProp || "(none)",
         assetSignature: assetSignature || "(none)",
         resolvedDamPath: resolvedDamPath || "(none)",
+        resolvedAssetRef: resolvedAssetRef || "(none)",
         currentAlt: valueRef.current || "",
       });
     }
 
-    if (!resolvedDamPath || !resolvedDamPath.startsWith("/content/dam/")) return;
+    if (!resolvedAssetRef) return;
 
     // Determine whether the asset actually changed (vs an event firing before persisted state converges).
     // We key by selected resource + assetField to survive UI remounts without using localStorage.
     const selectionKey = `${selectedResource || ""}|${config.assetField}`;
-    const prevDamPath = lastDamPathBySelectionKey.get(selectionKey) || "";
-    const assetChanged = Boolean(prevDamPath) && prevDamPath !== resolvedDamPath;
-    if (!prevDamPath || assetChanged) {
-      lastDamPathBySelectionKey.set(selectionKey, resolvedDamPath);
+    const prevAssetRef = lastDamPathBySelectionKey.get(selectionKey) || "";
+    const assetChanged = Boolean(prevAssetRef) && prevAssetRef !== resolvedAssetRef;
+    if (!prevAssetRef || assetChanged) {
+      lastDamPathBySelectionKey.set(selectionKey, resolvedAssetRef);
     }
 
     // Overwrite policy (Option B):
@@ -643,48 +702,53 @@ function LiveAssetMetadataDefaultField() {
     const isContentPatchEvent =
       typeof reason === "string" &&
       (reason.startsWith("ueEvent:aue:content-patch") || reason.startsWith("ueEvent:aue:content-details"));
-    const isFirstAssetSelection = !prevDamPath && Boolean(resolvedDamPath) && isContentPatchEvent;
+    const isFirstAssetSelection = !prevAssetRef && Boolean(resolvedAssetRef) && isContentPatchEvent;
 
     // Only apply for a new (or first) selection, and only once per resolvedDamPath.
     const shouldApply =
       (assetChanged || isFirstAssetSelection) &&
-      lastAppliedAssetRef.current !== resolvedDamPath;
+      lastAppliedAssetRef.current !== resolvedAssetRef;
 
-    if (resolvedDamPath !== lastTraceResolvedDamPathRef.current) {
-      lastTraceResolvedDamPathRef.current = resolvedDamPath;
+    if (resolvedAssetRef !== lastTraceResolvedDamPathRef.current) {
+      lastTraceResolvedDamPathRef.current = resolvedAssetRef;
       trace("tick", `run=${seq}:decision`, {
         reason,
         assetChanged,
         isFirstAssetSelection,
         valueEmpty: !valueRef.current,
-        prevDamPath: prevDamPath || "(none)",
+        prevDamPath: prevAssetRef || "(none)",
         lastApplied: lastAppliedAssetRef.current || "(none)",
         shouldApply: Boolean(shouldApply),
       });
     }
 
     // Track what we're currently seeing for debugging only (not used for apply decisions).
-    lastSeenAssetRef.current = resolvedDamPath;
+    lastSeenAssetRef.current = resolvedAssetRef;
     if (!shouldApply) return;
 
     trace("tick", `run=${seq}:apply:start`, {
       reason,
-      resolvedDamPath,
+      resolvedAssetRef,
       metadataKey: config.metadataKey,
     });
     setStatus({ state: "loading", message: `Fetching ${config.metadataKey}…` });
 
-    const metadataJson = await fetchDamMetadataJson({
-      aemHost,
-      assetPath: resolvedDamPath,
-      authScheme,
-      token,
-    });
+    const metadataJson = resolvedDamPath
+      ? await fetchDamMetadataJson({
+          aemHost,
+          assetPath: resolvedDamPath,
+          authScheme,
+          token,
+        })
+      : await fetchDeliveryMetadataJson({
+          deliveryOrigin,
+          assetUrn,
+        });
     const keysSample = metadataJson ? Object.keys(metadataJson).slice(0, 18).join(", ") : "";
     const resolved = resolveMetadataValue(metadataJson, config.metadataKey);
     const metadataValue = stringifyMetadataValue(resolved.value);
 
-    lastAppliedAssetRef.current = resolvedDamPath;
+    lastAppliedAssetRef.current = resolvedAssetRef;
     trace("tick", `run=${seq}:apply:fetched`, {
       reason,
       metadataKeyResolved: resolved.resolvedKey || "(none)",
@@ -868,5 +932,6 @@ function LiveAssetMetadataDefaultField() {
 export default function AssetMetadataDefaultField() {
   return <LiveAssetMetadataDefaultField />;
 }
+
 
 
