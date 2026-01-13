@@ -2,6 +2,8 @@ node_modules/
 dist/
 .parcel-cache/
 troubleshooting/
+docs/
+assets/
 .aio/
 .env
 .env.*
