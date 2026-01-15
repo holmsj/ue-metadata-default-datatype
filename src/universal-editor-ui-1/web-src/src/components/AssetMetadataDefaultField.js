@@ -497,6 +497,12 @@ function LiveAssetMetadataDefaultField() {
   const lastRunReasonRef = useRef("");
   const lastUeEventTsRef = useRef(0);
   const applyTokenRef = useRef("");
+  const lastContextRef = useRef({
+    selectedResource: "",
+    connectionName: "",
+    resourcePath: "",
+    aemHost: "",
+  });
 
   // Cross-iframe write coordination state.
   const instanceIdRef = useRef(
@@ -805,34 +811,102 @@ function LiveAssetMetadataDefaultField() {
     const editables = editorState?.editables || [];
     const editableById = new Map(editables.map((e) => [e.id, e]));
 
-    const selectedEditable = findSelectedEditable(editorState);
-    if (!selectedEditable) return;
-
     const connections = editorState?.connections || {};
     const connectionsKeys = Object.keys(connections).join(", ");
     const customTokens = editorState?.customTokens || {};
     const customTokensKeys = Object.keys(customTokens).join(", ");
 
-    const selectedResource = resolveResource(editableById, selectedEditable) || "";
-    const urn = parseResourceUrn(selectedResource);
-    const connectionName = urn?.connectionName || "";
-    const connectionValue = connectionName ? String(connections?.[connectionName] || "") : "";
-    const customTokenValue = connectionName ? String(customTokens?.[connectionName] || "") : "";
+    // Selection can be temporarily empty/unstable during UE transitions. When that happens, fall back
+    // to the last stable block context we saw while this renderer remained mounted.
+    //
+    // This avoids "dead zones" where we never run because `editorState.selected` is empty.
+    const selectedEditable = findSelectedEditable(editorState);
 
-    const parsedHostFromConnectionValue = pickAemConnection({ tmp: connectionValue }) || "";
+    let selectedResource = "";
+    let urn = null;
+    let connectionName = "";
+    let connectionValue = "";
+    let customTokenValue = "";
+    let parsedHostFromConnectionValue = "";
+    let aemHost = null;
+    let neighbor = null;
+    let neighborProp = "";
+    let assetRawValue = "";
+    let assetPath = "";
+    let assetSignature = "";
 
-    const aemHost =
-      (connectionName && pickAemConnection({ [connectionName]: connectionValue })) ||
-      (connectionName && pickAemConnection({ [connectionName]: customTokenValue })) ||
-      pickAemConnection(connections) ||
-      pickAemConnection(customTokens) ||
-      null;
+    if (selectedEditable) {
+      selectedResource = resolveResource(editableById, selectedEditable) || "";
+      urn = parseResourceUrn(selectedResource);
+      connectionName = urn?.connectionName || "";
+      connectionValue = connectionName ? String(connections?.[connectionName] || "") : "";
+      customTokenValue = connectionName ? String(customTokens?.[connectionName] || "") : "";
 
-    const neighbor = findNeighborEditable(editorState, selectedEditable, config.assetField);
-    const neighborProp = neighbor?.prop || "";
-    const assetRawValue = String(getEditableValue(neighbor) || "").trim();
-    const assetPath = assetRawValue;
-    const assetSignature = normalizeAssetSignature(assetRawValue);
+      parsedHostFromConnectionValue = pickAemConnection({ tmp: connectionValue }) || "";
+
+      aemHost =
+        (connectionName && pickAemConnection({ [connectionName]: connectionValue })) ||
+        (connectionName && pickAemConnection({ [connectionName]: customTokenValue })) ||
+        pickAemConnection(connections) ||
+        pickAemConnection(customTokens) ||
+        null;
+
+      neighbor = findNeighborEditable(editorState, selectedEditable, config.assetField);
+      neighborProp = neighbor?.prop || "";
+      assetRawValue = String(getEditableValue(neighbor) || "").trim();
+      assetPath = assetRawValue;
+      assetSignature = normalizeAssetSignature(assetRawValue);
+
+      // Persist last stable context for future runs in case selection becomes temporarily empty.
+      lastContextRef.current = {
+        selectedResource,
+        connectionName,
+        resourcePath: urn?.path || "",
+        aemHost: aemHost || "",
+      };
+    } else {
+      const isSelectionRelated =
+        typeof reason === "string" &&
+        (reason.startsWith("ueEvent:aue:content-patch") ||
+          reason.startsWith("ueEvent:aue:content-details") ||
+          reason.startsWith("ueEvent:aue:ui-select"));
+
+      // No selection and no context: we can't do anything meaningful yet.
+      if (!lastContextRef.current?.resourcePath) {
+        if (isSelectionRelated) {
+          setStatus({ state: "loading", message: "Waiting for selection…" });
+          trace("tick", `run=${seq}:waitingForSelection`, { reason });
+        }
+        return;
+      }
+
+      // Fall back to last stable context.
+      selectedResource = lastContextRef.current.selectedResource || "";
+      connectionName = lastContextRef.current.connectionName || "";
+      urn = {
+        connectionName,
+        path: lastContextRef.current.resourcePath || "",
+      };
+      connectionValue = connectionName ? String(connections?.[connectionName] || "") : "";
+      customTokenValue = connectionName ? String(customTokens?.[connectionName] || "") : "";
+      parsedHostFromConnectionValue = pickAemConnection({ tmp: connectionValue }) || "";
+
+      aemHost =
+        (connectionName && pickAemConnection({ [connectionName]: connectionValue })) ||
+        (connectionName && pickAemConnection({ [connectionName]: customTokenValue })) ||
+        pickAemConnection(connections) ||
+        pickAemConnection(customTokens) ||
+        lastContextRef.current.aemHost ||
+        null;
+
+      // Without a selected editable we may not have a neighbor editable; we rely on persisted
+      // component JSON as the source of truth.
+      neighbor = null;
+      neighborProp = "";
+      assetRawValue = "";
+      assetPath = "";
+      assetSignature = "";
+    }
 
     const token = connection.sharedContext?.get("token");
     const authScheme = connection.sharedContext?.get("authScheme") || "Bearer";
