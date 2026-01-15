@@ -26,6 +26,25 @@ import { getTraceLevel, trace, traceFn, summarize } from "./trace";
 const lastDamPathBySelectionKey = new Map();
 
 /**
+ * Cross-iframe coordination.
+ *
+ * When a block has multiple instances of this renderer (e.g. Alt + Mime Type), each renderer may
+ * attempt to write shortly after the same asset selection. Some canvas renderers / block scripts
+ * are sensitive to rapid consecutive content patches (can manifest as temporary DOM duplication).
+ *
+ * We coordinate *within a single authored component instance* (block) by keying on:
+ * `${aemHost}|${resourcePath}|${assetField}`
+ *
+ * We use BroadcastChannel (modern browsers) to serialize writes and add a small delay between them.
+ * This does not change business logic—each field still applies defaults independently when the
+ * asset changes—but it avoids patch "bursts".
+ */
+const BC_NAME = "ue.assetmetadatadefaults.v1";
+// Delay between successive writes within the same block.
+// This mitigates “patch bursts” that can trigger canvas rendering glitches in some environments.
+const INTER_WRITE_DELAY_MS = 700;
+
+/**
  * Normalize a UE `prop` identifier to a stable comparison key.
  * @param {string} prop
  * @returns {string}
@@ -425,7 +444,7 @@ const fetchDeliveryMetadataJson = traceFn(
 
 function LiveAssetMetadataDefaultField() {
   /**
-   * Component entrypoint for the `uix-asset-metadata-default` field renderer.
+   * Component entrypoint for the `asset-metadata-default` field renderer.
    *
    * Data flow (production-hardened, but readable):
    * - Attach to the UE host.
@@ -477,6 +496,245 @@ function LiveAssetMetadataDefaultField() {
   const runScheduledRef = useRef(false);
   const lastRunReasonRef = useRef("");
   const lastUeEventTsRef = useRef(0);
+  const applyTokenRef = useRef("");
+
+  // Cross-iframe write coordination state.
+  const instanceIdRef = useRef(
+    `inst_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+  );
+  const bcRef = useRef(null);
+  const lockStateRef = useRef(new Map()); // blockKey -> { ownerId, token, expiresAt }
+  const proposalsRef = useRef(new Map()); // blockKey -> Map(token -> { ts, instanceId, token, seenAt })
+
+  // Best-effort BroadcastChannel setup (modern browsers).
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return;
+    try {
+      const bc = new BroadcastChannel(BC_NAME);
+      bcRef.current = bc;
+      trace("tick", "AssetMetadataDefaultField:bc:ready", { name: BC_NAME });
+      bc.onmessage = (evt) => {
+        const msg = evt?.data || {};
+        const type = String(msg?.type || "");
+        const blockKey = String(msg?.blockKey || "");
+        if (!type || !blockKey) return;
+
+        const now = Date.now();
+
+        // Helper: expire a lock if needed.
+        const expireLockIfNeeded = () => {
+          const st = lockStateRef.current.get(blockKey);
+          if (st && st.expiresAt && st.expiresAt <= now) {
+            lockStateRef.current.delete(blockKey);
+          }
+        };
+        expireLockIfNeeded();
+
+        if (type === "proposal") {
+          const ts = Number(msg?.ts || 0);
+          const instanceId = String(msg?.instanceId || "");
+          if (!ts || !instanceId) return;
+          const token = `${ts}|${instanceId}`;
+
+          let m = proposalsRef.current.get(blockKey);
+          if (!m) {
+            m = new Map();
+            proposalsRef.current.set(blockKey, m);
+          }
+          m.set(token, { ts, instanceId, token, seenAt: now });
+
+          // Trim stale proposals (keep this lightweight).
+          for (const [k, v] of m.entries()) {
+            if (!v?.seenAt || now - v.seenAt > 1500) m.delete(k);
+          }
+          return;
+        }
+
+        if (type === "commit") {
+          const ts = Number(msg?.ts || 0);
+          const instanceId = String(msg?.instanceId || "");
+          const expiresAt = Number(msg?.expiresAt || 0);
+          if (!ts || !instanceId || !expiresAt) return;
+          const token = `${ts}|${instanceId}`;
+          lockStateRef.current.set(blockKey, { ownerId: instanceId, token, expiresAt });
+          proposalsRef.current.delete(blockKey);
+          return;
+        }
+
+        if (type === "release") {
+          const instanceId = String(msg?.instanceId || "");
+          const st = lockStateRef.current.get(blockKey);
+          if (st && st.ownerId === instanceId) {
+            lockStateRef.current.delete(blockKey);
+          }
+        }
+      };
+      return () => {
+        try {
+          bc.close();
+        } catch {
+          // ignore
+        }
+        if (bcRef.current === bc) bcRef.current = null;
+      };
+    } catch {
+      // ignore (some environments may throw)
+      trace("tick", "AssetMetadataDefaultField:bc:unavailable");
+      return;
+    }
+  }, []);
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const getLockState = (blockKey) => {
+    const now = Date.now();
+    const st = lockStateRef.current.get(blockKey);
+    if (st && st.expiresAt && st.expiresAt <= now) {
+      lockStateRef.current.delete(blockKey);
+      return null;
+    }
+    return st || null;
+  };
+
+  const post = (msg) => {
+    try {
+      bcRef.current?.postMessage(msg);
+    } catch {
+      // ignore
+    }
+  };
+
+  /**
+   * Acquire a per-block lock (BroadcastChannel) to serialize writes across multiple renderer iframes.
+   * @param {string} blockKey
+   * @returns {Promise<null | (() => Promise<void>)>} release function or null if BC unavailable
+   */
+  const acquireBlockLockBC = async (blockKey) => {
+    const bc = bcRef.current;
+    if (!bc || !blockKey) return null;
+
+    const selfId = instanceIdRef.current;
+    const startedAt = Date.now();
+    const timeoutMs = 6500;
+    const ttlMs = 5000;
+    const settleMs = 140;
+    const postCommitSettleMs = 60;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const st = getLockState(blockKey);
+      if (st && st.ownerId && st.ownerId !== selfId) {
+        // Wait until released/expired.
+        await sleep(180);
+        continue;
+      }
+      if (st && st.ownerId === selfId) {
+        // We already hold it.
+        return async () => {};
+      }
+
+      // Propose ourselves as leader for this blockKey.
+      const ts = Date.now();
+      const token = `${ts}|${selfId}`;
+
+      // Record our own proposal locally and broadcast it.
+      let m = proposalsRef.current.get(blockKey);
+      if (!m) {
+        m = new Map();
+        proposalsRef.current.set(blockKey, m);
+      }
+      m.set(token, { ts, instanceId: selfId, token, seenAt: ts });
+      post({ type: "proposal", blockKey, ts, instanceId: selfId });
+
+      // Collect proposals for a short settle window.
+      await sleep(settleMs);
+
+      const proposalsMap = proposalsRef.current.get(blockKey) || new Map();
+      const proposals = Array.from(proposalsMap.values())
+        .filter((p) => p && p.ts && p.instanceId)
+        // Trim stale items (defensive).
+        .filter((p) => Date.now() - (p.seenAt || 0) <= 1500);
+
+      // Always include our own token in case it was trimmed.
+      if (!proposals.find((p) => p.token === token)) proposals.push({ ts, instanceId: selfId, token, seenAt: ts });
+
+      // Pick deterministic winner: lowest ts, then lowest instanceId.
+      proposals.sort((a, b) => {
+        if (a.ts !== b.ts) return a.ts - b.ts;
+        return String(a.instanceId).localeCompare(String(b.instanceId));
+      });
+      const winner = proposals[0];
+
+      if (winner && winner.instanceId === selfId) {
+        const expiresAt = Date.now() + ttlMs;
+        lockStateRef.current.set(blockKey, { ownerId: selfId, token, expiresAt });
+        post({ type: "commit", blockKey, ts, instanceId: selfId, expiresAt });
+
+        // Briefly yield to allow another commit to be observed (rare race).
+        await sleep(postCommitSettleMs);
+        const st2 = getLockState(blockKey);
+        if (st2 && st2.ownerId === selfId && st2.token === token) {
+          trace("tick", "AssetMetadataDefaultField:lock:acquired", {
+            blockKey: summarize(blockKey),
+            waitedMs: Date.now() - startedAt,
+          });
+          return async () => {
+            // Space out patch bursts by delaying release slightly.
+            await sleep(INTER_WRITE_DELAY_MS);
+            // Only release if we're still the owner.
+            const cur = getLockState(blockKey);
+            if (cur && cur.ownerId === selfId) {
+              lockStateRef.current.delete(blockKey);
+              post({ type: "release", blockKey, instanceId: selfId });
+              trace("tick", "AssetMetadataDefaultField:lock:released", { blockKey: summarize(blockKey) });
+            }
+          };
+        }
+      }
+
+      // Lost or conflicted: wait a bit before retrying.
+      await sleep(220);
+    }
+
+    trace("tick", "AssetMetadataDefaultField:lock:timeout", { blockKey });
+    return null;
+  };
+
+  /**
+   * Serialize writes within a single block.
+   *
+   * Prefer Web Locks API when available (atomic, no election needed). Fall back to BroadcastChannel.
+   *
+   * @template T
+   * @param {string} blockKey
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  const withBlockWriteLock = async (blockKey, fn) => {
+    if (!blockKey) return await fn();
+
+    // Web Locks API (Chrome/Edge; increasingly available elsewhere). This works across iframes for the same origin.
+    const lockName = `ue.assetmetadatadefaults:block:${blockKey}`;
+    const locks = typeof navigator !== "undefined" ? navigator.locks : null;
+    if (locks && typeof locks.request === "function") {
+      trace("tick", "AssetMetadataDefaultField:lock:usingWebLocks", { lockName: summarize(lockName) });
+      // Ensure only one writer at a time for this blockKey.
+      // Note: we intentionally add a delay while still holding the lock to avoid immediate back-to-back patches.
+      // eslint-disable-next-line no-return-await
+      return await locks.request(lockName, { mode: "exclusive" }, async () => {
+        const v = await fn();
+        await sleep(INTER_WRITE_DELAY_MS);
+        return v;
+      });
+    }
+
+    const release = await acquireBlockLockBC(blockKey);
+    if (!release) return await fn();
+    try {
+      return await fn();
+    } finally {
+      await release();
+    }
+  };
 
   // Debug UI is controlled by the same single flag as console tracing.
   // Any non-off value shows debug UI.
@@ -578,6 +836,18 @@ function LiveAssetMetadataDefaultField() {
 
     const token = connection.sharedContext?.get("token");
     const authScheme = connection.sharedContext?.get("authScheme") || "Bearer";
+    // Per-block coordination key.
+    //
+    // Prefer stable identifiers from the selected resource URN so coordination remains effective
+    // even if the AEM host cannot be derived for a moment (transient editorState inconsistencies).
+    //
+    // We intentionally do NOT include metadataKey or the current field name here: we want all
+    // instances within the same block+assetField to serialize writes.
+    const blockKey = urn?.path
+      ? `${connectionName || "aem"}|${urn.path}|${config.assetField}`
+      : selectedResource
+        ? `${connectionName || "aem"}|${selectedResource}|${config.assetField}`
+        : "";
 
     // Source of truth: persisted component property from `<component>.json` when available.
     // (The editable value we see in editorState is sometimes a transformed delivery URL.)
@@ -681,7 +951,16 @@ function LiveAssetMetadataDefaultField() {
       });
     }
 
-    if (!resolvedAssetRef) return;
+    // If we can't yet resolve the asset reference after a selection-related event, show a clear
+    // “waiting” message instead of silently doing nothing. UE can be eventually consistent right
+    // after selection/persist; our scheduled retries should converge shortly.
+    if (!resolvedAssetRef) {
+      if (isContentPatchEvent) {
+        setStatus({ state: "loading", message: "Waiting for asset selection to persist…" });
+        trace("tick", `run=${seq}:waitingForAssetRef`, { reason });
+      }
+      return;
+    }
 
     // Determine whether the asset actually changed (vs an event firing before persisted state converges).
     // We key by selected resource + assetField to survive UI remounts without using localStorage.
@@ -733,6 +1012,10 @@ function LiveAssetMetadataDefaultField() {
     });
     setStatus({ state: "loading", message: `Fetching ${config.metadataKey}…` });
 
+    // Protect against stale writes if the user changes selection while async work is in-flight.
+    const applyToken = `${resolvedAssetRef}|${seq}`;
+    applyTokenRef.current = applyToken;
+
     const metadataJson = resolvedDamPath
       ? await fetchDamMetadataJson({
           aemHost,
@@ -748,30 +1031,58 @@ function LiveAssetMetadataDefaultField() {
     const resolved = resolveMetadataValue(metadataJson, config.metadataKey);
     const metadataValue = stringifyMetadataValue(resolved.value);
 
-    lastAppliedAssetRef.current = resolvedAssetRef;
     trace("tick", `run=${seq}:apply:fetched`, {
       reason,
       metadataKeyResolved: resolved.resolvedKey || "(none)",
       metadataValue,
     });
 
-    connection.host.field.onChange(metadataValue);
-    setValue(metadataValue);
-    valueRef.current = metadataValue;
-    if (showDebug) {
-      setDebug((d) => ({
-        ...d,
-        metadataKeysSample: keysSample,
-        metadataKeyResolved: resolved.resolvedKey || "",
-      }));
-    }
-    setStatus({
-      state: "done",
-      message: metadataValue
-        ? `Auto-filled from ${resolved.resolvedKey || config.metadataKey}`
-        : `No value found for ${config.metadataKey}`,
+    await withBlockWriteLock(blockKey, async () => {
+      // Abort if newer apply attempt superseded this one.
+      if (applyTokenRef.current !== applyToken) {
+        trace("tick", `run=${seq}:apply:aborted`, { reason, note: "superseded" });
+        return;
+      }
+      // Abort if the currently-seen asset changed while we waited.
+      if (lastSeenAssetRef.current && lastSeenAssetRef.current !== resolvedAssetRef) {
+        trace("tick", `run=${seq}:apply:aborted`, { reason, note: "assetChangedWhileWaiting" });
+        return;
+      }
+
+      // Hygiene: only write when the value changes (avoids unnecessary content patches).
+      //
+      // IMPORTANT: We compare against `valueRef.current` (what this renderer is currently showing),
+      // not `host.field.getValue()`. During asset changes UE can be eventually consistent, and
+      // `getValue()` may transiently report a stale/incorrect value which could cause us to skip
+      // a necessary write (especially when clearing to "").
+      const currentValue = valueRef.current || "";
+
+      // Mark as applied for this asset even if value matches, so we don't keep retrying.
+      lastAppliedAssetRef.current = resolvedAssetRef;
+
+      if (metadataValue !== currentValue) {
+        connection.host.field.onChange(metadataValue);
+        setValue(metadataValue);
+        valueRef.current = metadataValue;
+      } else {
+        trace("tick", `run=${seq}:apply:skipped`, { reason, note: "noChange" });
+      }
+
+      if (showDebug) {
+        setDebug((d) => ({
+          ...d,
+          metadataKeysSample: keysSample,
+          metadataKeyResolved: resolved.resolvedKey || "",
+        }));
+      }
+      setStatus({
+        state: "done",
+        message: metadataValue
+          ? `Auto-filled from ${resolved.resolvedKey || config.metadataKey}`
+          : `No value found for ${config.metadataKey}`,
+      });
+      trace("tick", `run=${seq}:apply:done`, { reason, newAlt: metadataValue });
     });
-    trace("tick", `run=${seq}:apply:done`, { reason, newAlt: metadataValue });
   };
 
   // Schedule a runOnce (debounced) for bursty event streams.
@@ -820,7 +1131,7 @@ function LiveAssetMetadataDefaultField() {
     scheduleRun("initial");
 
     const onStorage = (e) => {
-      if (!e || e.key !== "ue.assetMetadataDefaults.lastUeEvent") return;
+      if (!e || e.key !== "ue.assetmetadatadefaults.lastUeEvent") return;
       try {
         const parsed = JSON.parse(String(e.newValue || "{}"));
         const name = String(parsed?.eventName || "");
@@ -837,9 +1148,10 @@ function LiveAssetMetadataDefaultField() {
         ) {
           scheduleRun(`ueEvent:${name}`);
           // For content patches, re-check after a short delay in case editorState is not yet updated.
-          if (name === "aue:content-patch") {
+          if (name === "aue:content-patch" || name === "aue:content-details") {
             scheduleRunAfter(250, `ueEvent:${name}:retry250`);
             scheduleRunAfter(1000, `ueEvent:${name}:retry1000`);
+            scheduleRunAfter(2000, `ueEvent:${name}:retry2000`);
           }
         }
       } catch {

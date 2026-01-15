@@ -5,7 +5,7 @@ import { extensionId, rendererDataType } from "./constants";
 import metadata from "../../../../app-metadata.json";
 import { isTraceEnabled, summarize, trace } from "./trace";
 
-const LAST_UE_EVENT_KEY = "ue.assetMetadataDefaults.lastUeEvent";
+const LAST_UE_EVENT_KEY = "ue.assetmetadatadefaults.lastUeEvent";
 
 export default function ExtensionRegistration() {
   const isEmbedded = useMemo(() => window.self !== window.top, []);

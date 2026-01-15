@@ -4,7 +4,7 @@
  * Goals:
  * - Provide a consistent log prefix with a monotonically increasing sequence number.
  * - Allow switching verbosity without changing code:
- *   - localStorage key: `ue.assetMetadataDefaults.debug` = "off" | "tick" | "all"
+ *   - localStorage key: `ue.assetmetadatadefaults.debug` = "off" | "tick" | "all"
  *   - global override (useful if iframe storage is blocked): `window.__UE_ASSET_METADATA_DEFAULTS_DEBUG__` = "off" | "tick" | "all"
  *   - Default: "off"
  * - Avoid logging huge objects by default; prefer small summaries.
@@ -12,7 +12,7 @@
 const TRACE_PREFIX = "[ue-asset-metadata-defaults]";
 // Single switch controlling both console tracing + in-field debug UI.
 // (The field UI treats any non-off value as "show debug UI".)
-const TRACE_STORAGE_KEY = "ue.assetMetadataDefaults.debug";
+const TRACE_STORAGE_KEY = "ue.assetmetadatadefaults.debug";
 const TRACE_GLOBAL_KEY = "__UE_ASSET_METADATA_DEFAULTS_DEBUG__";
 // Default to OFF so the extension runs cleanly unless the developer opts in.
 const DEFAULT_TRACE_LEVEL = "off";

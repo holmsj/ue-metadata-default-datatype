@@ -1,4 +1,4 @@
 export const extensionId = "uixassetmetadatadefaults";
-export const rendererDataType = "uix-asset-metadata-default";
+export const rendererDataType = "asset-metadata-default";
 
 

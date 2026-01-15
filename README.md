@@ -43,7 +43,7 @@ To use this renderer, set your target field's `component` to match the renderer 
 {
   "name": "imageAlt",
   "label": "Alt Text",
-  "component": "uix-asset-metadata-default",
+  "component": "asset-metadata-default",
   "valueType": "string",
   "assetField": "image",
   "metadataKey": "dc:title"
