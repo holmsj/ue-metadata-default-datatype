@@ -983,6 +983,20 @@ function LiveAssetMetadataDefaultField() {
     }
     const resolvedAssetRef = resolvedDamPath || assetUrn || "";
 
+    // Determine whether this run is driven by a selection/persist event stream.
+    const isSelectionRelatedEvent =
+      typeof reason === "string" &&
+      (reason.startsWith("ueEvent:aue:content-patch") ||
+        reason.startsWith("ueEvent:aue:content-details") ||
+        reason.startsWith("ueEvent:aue:ui-select"));
+
+    // For convergence retries, we tag the reason as `...:retry{ms}`.
+    // Clearing on removal is best-effort, but we gate it to later retries to avoid false clears
+    // during eventual consistency windows (e.g. stale component JSON right after selection).
+    const isLateConvergenceRetry =
+      typeof reason === "string" &&
+      (reason.endsWith(":retry2000") || reason.endsWith(":retry5000"));
+
     const siblingProps = (editorState?.editables || [])
       .filter((e) => (e?.parentid || "") === (selectedEditable.parentid || selectedEditable.id || ""))
       .map((e) => normalizeProp(e?.prop || ""))
@@ -1025,14 +1039,58 @@ function LiveAssetMetadataDefaultField() {
       });
     }
 
-    // If we can't yet resolve the asset reference after a selection-related event, show a clear
-    // “waiting” message instead of silently doing nothing. UE can be eventually consistent right
-    // after selection/persist; our scheduled retries should converge shortly.
+    // If the asset reference is missing, this may be either:
+    // - a transient convergence gap right after selection/persist, or
+    // - a real removal (author clicked the "clear" button).
+    //
+    // UX choice: when the reference is actually removed, auto-clear this metadata field to avoid
+    // stale values. We do this conservatively on later retries to reduce false clears.
     if (!resolvedAssetRef) {
-      if (isContentPatchEvent) {
+      const selectionKey = `${selectedResource || ""}|${config.assetField}`;
+      const prevAssetRef = lastDamPathBySelectionKey.get(selectionKey) || "";
+      const hadPreviousAsset = Boolean(prevAssetRef);
+      const alreadyClearedState =
+        !hadPreviousAsset &&
+        valueRef.current === "" &&
+        lastAppliedAssetRef.current === "" &&
+        lastSeenAssetRef.current === "";
+
+      // If the reference is truly empty and we've already processed the removal (or the page loaded
+      // with no asset selected), don't show a perpetual "waiting" message. Instead, show a stable
+      // state that explains what's happening.
+      if (isSelectionRelatedEvent && alreadyClearedState) {
+        setStatus({ state: "done", message: "No asset selected" });
+        trace("tick", `run=${seq}:noAssetSelected`, { reason });
+        return;
+      }
+
+      if (isSelectionRelatedEvent) {
         setStatus({ state: "loading", message: "Waiting for asset selection to persist (retrying)…" });
         trace("tick", `run=${seq}:waitingForAssetRef`, { reason });
       }
+
+      // Only clear if we previously had an asset for this block+field, and we are on a later
+      // convergence retry (meaning we've waited long enough for persisted JSON to catch up).
+      if (hadPreviousAsset && isLateConvergenceRetry) {
+        trace("tick", `run=${seq}:assetRemoved:clearing`, { reason, prevAssetRef });
+
+        // Serialize within block (same mechanism as apply) to avoid patch bursts.
+        await withBlockWriteLock(blockKey, async () => {
+          // If user typed something manually after removal, they can re-enter later; we treat
+          // metadata-derived values as stale once the asset is removed.
+          if (valueRef.current !== "") {
+            connection.host.field.onChange("");
+            setValue("");
+            valueRef.current = "";
+          }
+          lastAppliedAssetRef.current = "";
+          lastSeenAssetRef.current = "";
+          lastDamPathBySelectionKey.set(selectionKey, "");
+          setStatus({ state: "done", message: "Cleared (asset removed)" });
+          trace("tick", `run=${seq}:assetRemoved:cleared`, { reason });
+        });
+      }
+
       return;
     }
 
