@@ -1030,7 +1030,7 @@ function LiveAssetMetadataDefaultField() {
     // after selection/persist; our scheduled retries should converge shortly.
     if (!resolvedAssetRef) {
       if (isContentPatchEvent) {
-        setStatus({ state: "loading", message: "Waiting for asset selection to persist…" });
+        setStatus({ state: "loading", message: "Waiting for asset selection to persist (retrying)…" });
         trace("tick", `run=${seq}:waitingForAssetRef`, { reason });
       }
       return;
@@ -1226,6 +1226,7 @@ function LiveAssetMetadataDefaultField() {
             scheduleRunAfter(250, `ueEvent:${name}:retry250`);
             scheduleRunAfter(1000, `ueEvent:${name}:retry1000`);
             scheduleRunAfter(2000, `ueEvent:${name}:retry2000`);
+            scheduleRunAfter(5000, `ueEvent:${name}:retry5000`);
           }
         }
       } catch {
