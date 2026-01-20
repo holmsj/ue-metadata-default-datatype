@@ -44,6 +44,10 @@ const BC_NAME = "ue.assetmetadatadefaults.v1";
 // This mitigates “patch bursts” that can trigger canvas rendering glitches in some environments.
 const INTER_WRITE_DELAY_MS = 700;
 
+// Author-facing status copy (avoid UE jargon).
+const MSG_UPDATING_ASSET_DETAILS = "Updating image details…";
+const MSG_FAILED_ASSET_DETAILS = "Failed to read the asset details. Please try again.";
+
 /**
  * Normalize a UE `prop` identifier to a stable comparison key.
  * @param {string} prop
@@ -874,7 +878,7 @@ function LiveAssetMetadataDefaultField() {
       // No selection and no context: we can't do anything meaningful yet.
       if (!lastContextRef.current?.resourcePath) {
         if (isSelectionRelated) {
-          setStatus({ state: "loading", message: "Waiting for selection…" });
+          setStatus({ state: "loading", message: MSG_UPDATING_ASSET_DETAILS });
           trace("tick", `run=${seq}:waitingForSelection`, { reason });
         }
         return;
@@ -996,6 +1000,8 @@ function LiveAssetMetadataDefaultField() {
     const isLateConvergenceRetry =
       typeof reason === "string" &&
       (reason.endsWith(":retry2000") || reason.endsWith(":retry5000"));
+    const isFinalConvergenceRetry =
+      typeof reason === "string" && reason.endsWith(":retry5000");
 
     const siblingProps = (editorState?.editables || [])
       .filter((e) => (e?.parentid || "") === (selectedEditable.parentid || selectedEditable.id || ""))
@@ -1065,8 +1071,13 @@ function LiveAssetMetadataDefaultField() {
       }
 
       if (isSelectionRelatedEvent) {
-        setStatus({ state: "loading", message: "Waiting for asset selection to persist (retrying)…" });
-        trace("tick", `run=${seq}:waitingForAssetRef`, { reason });
+        if (isFinalConvergenceRetry) {
+          setStatus({ state: "error", message: MSG_FAILED_ASSET_DETAILS });
+          trace("tick", `run=${seq}:assetRef:timeout`, { reason });
+        } else {
+          setStatus({ state: "loading", message: MSG_UPDATING_ASSET_DETAILS });
+          trace("tick", `run=${seq}:waitingForAssetRef`, { reason });
+        }
       }
 
       // Only clear if we previously had an asset for this block+field, and we are on a later
@@ -1086,7 +1097,9 @@ function LiveAssetMetadataDefaultField() {
           lastAppliedAssetRef.current = "";
           lastSeenAssetRef.current = "";
           lastDamPathBySelectionKey.set(selectionKey, "");
-          setStatus({ state: "done", message: "Cleared (asset removed)" });
+          // UX: show a single stable message rather than a transient "cleared" state.
+          // Debug traces still indicate that a clear happened.
+          setStatus({ state: "done", message: "No asset selected" });
           trace("tick", `run=${seq}:assetRemoved:cleared`, { reason });
         });
       }
