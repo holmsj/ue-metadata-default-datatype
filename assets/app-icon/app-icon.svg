@@ -1,0 +1,48 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Minimal grayscale app icon:
+    - asset "tile" (document/image)
+    - metadata "tag"
+    - subtle arrow indicating defaults flowing from asset to field
+  -->
+  <defs>
+    <filter id="shadow" x="0" y="0" width="512" height="512" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!--
+    Main icon, scaled up to fill the canvas.
+    (No outer background — intended to be used directly as the app icon.)
+  -->
+  <!--
+    Centering strategy:
+    - Translate canvas center to (256,256)
+    - Scale the icon group
+    - Translate the icon's design center (~265,256) to the origin
+  -->
+  <g filter="url(#shadow)" transform="translate(256 256) scale(1.62) translate(-265 -256)">
+    <rect x="148" y="120" width="216" height="272" rx="28" fill="#FFFFFF" stroke="#1F1F24" stroke-opacity="0.18"/>
+
+    <!-- simple folded corner -->
+    <path d="M328 120H364V156C364 166.493 355.493 175 345 175H328V120Z" fill="#E7E7EA"/>
+    <path d="M328 120L364 156H346C336.059 156 328 147.941 328 138V120Z" fill="#D7D7DC"/>
+
+    <!-- image placeholder -->
+    <rect x="176" y="176" width="160" height="92" rx="16" fill="#EFEFF2"/>
+    <circle cx="208" cy="210" r="12" fill="#CFCFD6"/>
+    <path d="M188 256L224 220L250 246L276 228L324 276H188V256Z" fill="#BDBDC6"/>
+
+    <!-- metadata tag -->
+    <path d="M176 292H288C298.493 292 307 300.507 307 311V333C307 343.493 298.493 352 288 352H176C165.507 352 157 343.493 157 333V311C157 300.507 165.507 292 176 292Z" fill="#2B2B31"/>
+    <circle cx="182" cy="322" r="6" fill="#9A9AA3"/>
+    <rect x="196" y="313" width="92" height="8" rx="4" fill="#FFFFFF" fill-opacity="0.86"/>
+    <rect x="196" y="327" width="64" height="8" rx="4" fill="#FFFFFF" fill-opacity="0.68"/>
+
+    <!-- arrow (defaults flow) -->
+    <path d="M322 344H368" stroke="#2B2B31" stroke-width="10" stroke-linecap="round"/>
+    <path d="M360 332L382 344L360 356" fill="none" stroke="#2B2B31" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
+
+

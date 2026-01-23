@@ -8,6 +8,17 @@ This example UI Extension demonstrates a **custom field renderer** for Universal
   (or on the first asset selection event for a component).
   - It does **not** auto-fill merely because the field is empty (empty can be intentional).
 
+<video src="assets/basic-demo.mp4" autoplay loop muted playsinline controls width="640"></video>
+
+If the video doesn’t render inline on GitHub, open it directly: [`assets/basic-demo.mp4`](assets/basic-demo.mp4)
+
+**Full feature overview / design notes:** see [`docs/developer/metadata-default-field.md`](docs/developer/metadata-default-field.md).
+
+## Docs
+
+- **Developer overview (recommended)**: [`docs/developer/metadata-default-field.md`](docs/developer/metadata-default-field.md)
+- **Diagrams**: [`docs/diagrams/README.md`](docs/diagrams/README.md)
+
 ## Local dev / testing
 
 - Start the extension:
@@ -53,50 +64,9 @@ To use this renderer, set your target field's `component` to match the renderer 
 - `assetField`: the neighbor field name that contains the asset reference (e.g. `/content/dam/...`)
 - `metadataKey`: the DAM metadata key to use as default (e.g. `dc:title`)
 
-## Implementation notes (why it looks “more complex than expected”)
+## Notes
 
-### Dynamic Media delivery URLs vs persisted DAM paths
+For deeper implementation details (Dynamic Media OpenAPI handling, eventual consistency behavior, CORS/PNA, and troubleshooting), see:
 
-In AEM/UE authoring, the asset field value you see in `editorState` can be a Dynamic Media delivery URL
-even when the author selected an asset from `/content/dam/...`.
-
-To reliably determine **which DAM asset is actually selected**, the renderer resolves the persisted
-component property by fetching:
-
-- `<selectedResourcePath>.json` (e.g. `.../hero.json`) and reading the configured `assetField`
-
-### Dynamic Media OpenAPI (delivery domain) assets
-
-If the persisted value in `<component>.json` is an **OpenAPI delivery URL** like:
-
-- `https://delivery-<program>-<env>.adobeaemcloud.com/adobe/assets/urn:aaid:aem:<uuid>/original/as/<name>.<ext>`
-
-…then the renderer treats that as the source of truth and fetches metadata from:
-
-- `https://delivery-.../adobe/assets/urn:aaid:aem:<uuid>/metadata`
-
-The response typically contains `assetMetadata` (e.g. `dc:title`) and `repositoryMetadata`
-(e.g. `dc:format`, size). The renderer resolves your configured `metadataKey` against:
-
-- top-level keys, then
-- `assetMetadata`, then
-- `repositoryMetadata`
-
-### UE eventual consistency (“lags 1”)
-
-Host events like `aue:content-patch` can fire **before** the newly selected asset is persisted,
-meaning `<component>.json` can briefly still return the *previous* DAM path.
-
-This implementation avoids applying stale defaults by:
-
-- Scheduling short delayed re-checks (e.g. 250ms and 1000ms) after `aue:content-patch`
-- Refusing to cache/use a persisted DAM path if its filename doesn’t match the current DM URL filename
-
-### Event-driven (no polling) via a localStorage bridge
-
-UE host events are received in the “registration” iframe. The renderer iframe listens for those events
-via a small `localStorage` bridge (writing the last event payload to a key and reacting to `storage`).
-
-This keeps the renderer **event-driven** (no constant polling), while staying robust across UE iframe
-lifecycle behavior.
+- [`docs/developer/metadata-default-field.md`](docs/developer/metadata-default-field.md)
 
