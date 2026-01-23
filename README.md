@@ -8,9 +8,9 @@ This example UI Extension demonstrates a **custom field renderer** for Universal
   (or on the first asset selection event for a component).
   - It does **not** auto-fill merely because the field is empty (empty can be intentional).
 
-<video src="assets/basic-demo.mp4" autoplay loop muted playsinline controls width="640"></video>
+![Basic demo](assets/basic-demo.gif)
 
-If the video doesn’t render inline on GitHub, open it directly: [`assets/basic-demo.mp4`](assets/basic-demo.mp4)
+If the GIF doesn’t render inline on GitHub, open it directly: [`assets/basic-demo.gif`](assets/basic-demo.gif)
 
 **Full feature overview / design notes:** see [`docs/developer/metadata-default-field.md`](docs/developer/metadata-default-field.md).
 

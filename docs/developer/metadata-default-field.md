@@ -4,6 +4,10 @@
 
 **Metadata Default Field** is a Universal Editor **custom field renderer** that auto-populates a field value from the metadata of a neighboring selected asset (image/PDF/etc.).
 
+![Basic demo](../../assets/basic-demo.gif)
+
+If the GIF doesn’t render inline on GitHub, open it directly: [`assets/basic-demo.gif`](../../assets/basic-demo.gif)
+
 It is designed for “set a sensible default once” scenarios like:
 
 - **Alt Text defaults** from `dc:title` when an author selects an image.
