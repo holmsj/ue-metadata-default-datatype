@@ -2,36 +2,39 @@
 
 ## Purpose
 
-**Metadata Default Field** is a Universal Editor **custom field renderer** that auto-populates a field value from the metadata of a neighboring selected asset (image/PDF/etc.).
+**Metadata Default Field** is a Universal Editor **custom data type** that auto-populates a field value from the metadata of a neighboring selected asset (image/PDF/etc.). 
 
-![Basic demo](../../assets/basic-demo.gif)
-
-If the GIF doesn’t render inline on GitHub, open it directly: [`assets/basic-demo.gif`](../../assets/basic-demo.gif)
+![Basic demo](../assets/basic-demo.gif)
 
 It is designed for “set a sensible default once” scenarios like:
 
 - **Alt Text defaults** from `dc:title` when an author selects an image.
 - **Mime Type defaults** from `dam:MIMEtype` when an author selects a document.
 
+You can have multiple instances of this field linked to different properties of the same referenced asset
+
+![Multiple fields](../assets/multiple-fields.jpg)
+
 ## Problem being solved
 
 Universal Editor properties often include:
 
 - an **asset reference field** (e.g. `image`)
-- and a related **text field** (e.g. `imageAlt`, `imageMimeType`)
+- and a related **text field** (e.g. `imageAlt`)
 
 Authors typically have to re-enter information that already exists in DAM metadata. This renderer reduces friction by:
 
 - writing the default on the **first asset selection**, and
 - rewriting when the author selects a different asset
 
-This allows the author to manually override the default value from metadata including scenarios where the field should be left empty, such as alt text for a purely decorative image.
+This allows the author to manually override any default value from metadata including scenarios where the field should be left empty, such as alt text for a purely decorative image.
 
 ## How it works (high level)
 
 At runtime, the renderer:
 
-- **Listens to Universal Editor host events** (no polling) via a small localStorage bridge from the registration iframe to the renderer iframe.
+- **Listens to Universal Editor host events** via a small localStorage bridge from the registration iframe to the renderer iframe.
+- Internally, it schedules a single “evaluate + apply if needed” function (named `runOnce` in the code) after relevant events.
 - **Finds the currently selected editable** and the configured **neighbor asset field** (`assetField`) within the same authored component instance.
 - Uses the authored component JSON (`{resourcePath}.json`) as the **source of truth** for the asset reference because the value in `editorState` may be transformed (for example, a Dynamic Media delivery URL).
 - Resolves metadata from either:
@@ -43,7 +46,7 @@ At runtime, the renderer:
 - Applies the value only when it detects a **new selection**:
   - first selection event (triggered by a relevant UE event), or
   - asset changed compared to the last applied asset for this component+field.
-- Adds short delayed retries (250ms/1000ms) after patch events to handle UE eventual consistency (“lags 1”).
+- Adds **staggered delayed retries over ~5 seconds** after content events to handle UE eventual consistency (250ms → 1s → 2s → 5s).
 
 ## Diagram (runtime flow)
 
@@ -232,7 +235,7 @@ This extension intentionally fetches Delivery metadata with **credentials omitte
 
 ### Eventual consistency (“lags 1”)
 
-UE host events can fire before `{resourcePath}.json` reflects the new selection. The renderer mitigates this with short delayed re-checks (250ms and 1000ms) after `aue:content-patch`, plus a convergence guard when it can compare filenames.
+UE host events can fire before `{resourcePath}.json` reflects the new selection. The renderer mitigates this with **staggered delayed re-checks up to 5 seconds** after `aue:content-patch` and `aue:content-details`, plus a convergence guard when it can compare filenames.
 
 ### Applies defaults only on selection/change
 

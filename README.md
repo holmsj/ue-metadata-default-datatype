@@ -1,6 +1,6 @@
-# Universal Editor - Asset Metadata Defaults (WIP)
+# Universal Editor - Asset Metadata Defaults
 
-This example UI Extension demonstrates a **custom field renderer** for Universal Editor that:
+This Universal Editor Extension implements a **custom field renderer** that:
 
 - Reads a **neighbor asset field** (e.g. `image`) from the currently selected editable (via `editorState`)
 - Fetches **AEM Author DAM metadata** for the selected asset (e.g. `dc:title`)
@@ -8,9 +8,7 @@ This example UI Extension demonstrates a **custom field renderer** for Universal
   (or on the first asset selection event for a component).
   - It does **not** auto-fill merely because the field is empty (empty can be intentional).
 
-![Basic demo](assets/basic-demo.gif)
-
-If the GIF doesn’t render inline on GitHub, open it directly: [`assets/basic-demo.gif`](assets/basic-demo.gif)
+![Basic demo](docs/assets/basic-demo.gif)
 
 **Full feature overview / design notes:** see [`docs/developer/metadata-default-field.md`](docs/developer/metadata-default-field.md).
 
@@ -23,28 +21,20 @@ If the GIF doesn’t render inline on GitHub, open it directly: [`assets/basic-d
 
 - Start the extension:
   - `aio app run`
-- Accept the local cert (first run): open `https://localhost:9080`
+  
+> **🚨 IMPORTANT: Don't Skip This Step! 🚨**
+>
+> **On your first run, you _must_ accept the local development certificate, or Universal Editor will fail to load your extension.**
+>
+> 👉 Open [https://localhost:9080](https://localhost:9080) in your browser and accept the security warning to proceed.
+>
 - Load Universal Editor in dev mode and force-load your local extension UI from `https://localhost:9080`.
 
 ### ✅ Working Universal Editor URL format (author-hosted UE)
 
 **Important:** for Universal Editor, `devMode=true` and `ext=...` must be **after** the `index.html` inside the hash-route URL (not on the `/ui?...` part), otherwise UE will ignore them and your localhost app will never be requested.
 
-**Example (working, recommended / unencoded):**
-
-`https://author-p82652-e710588.adobeaemcloud.com/ui#/@psc/aem/universal-editor/canvas/author-p82652-e710588.adobeaemcloud.com/content/xwalk-april/index.html?devMode=true&ext=https://localhost:9080`
-
-**Example (working, URL-encoded):**
-
-`https://author-p82652-e710588.adobeaemcloud.com/ui#/@psc/aem/universal-editor/canvas/author-p82652-e710588.adobeaemcloud.com/content/xwalk-april/index.html?devMode=true&ext=https%3A%2F%2Flocalhost%3A9080`
-
-**Template:**
-
-`https://<author-host>/ui#/@<org>/aem/universal-editor/canvas/<author-host>/<path-to-page>.html?devMode=true&ext=https://localhost:9080`
-
-If you need to URL-encode `ext` (e.g., when pasting into tooling that re-escapes URLs), use:
-
-`ext=https%3A%2F%2Flocalhost%3A9080`
+`https://<author-host>.adobeaemcloud.com/ui#/@<org>/aem/universal-editor/canvas/<author-host>.adobeaemcloud.com/content/<path-to-page>.html?devMode=true&ext=https://localhost:9080`
 
 ## `component-models.json` example
 

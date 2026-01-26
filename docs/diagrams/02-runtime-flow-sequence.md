@@ -12,7 +12,7 @@ sequenceDiagram
   HOST->>EXT: events.listen(eventName, data)
 
   EXT->>EXT: schedule runOnce(reason)
-  EXT->>EXT: schedule retry after 250ms and 1000ms
+  EXT->>EXT: schedule staggered retries (250ms, 1s, 2s, 5s)
 
   EXT->>HOST: host.editorState.get()
   HOST-->>EXT: editorState
