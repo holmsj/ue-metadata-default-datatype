@@ -2,7 +2,7 @@
 
 ## Purpose
 
-**Metadata Default Field** is a Universal Editor **custom data type** that auto-populates a field value from the metadata of a neighboring selected asset (image/PDF/etc.). 
+**Metadata Default Field** is a Universal Editor **custom data type renderer** that auto-populates its field value from the metadata of a neighboring selected asset (image/PDF/etc.). 
 
 ![Basic demo](../assets/basic-demo.gif)
 
@@ -14,6 +14,14 @@ It is designed for “set a sensible default once” scenarios like:
 You can have multiple instances of this field linked to different properties of the same referenced asset
 
 ![Multiple fields](../assets/multiple-fields.jpg)
+
+## Scope (AEM authoring vs DA)
+
+This extension is designed for **AEM (XWalk / Edge Delivery Services) authoring in Universal Editor**.
+
+It assumes AEM-backed endpoints exist at runtime (for example, `{resourcePath}.json` and `/content/dam/.../jcr:content/metadata.json`, plus optional Dynamic Media delivery metadata).
+
+It is **not intended for Document Authoring (DA / da.live Author Bus)**.
 
 ## Problem being solved
 

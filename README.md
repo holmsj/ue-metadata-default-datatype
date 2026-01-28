@@ -1,12 +1,14 @@
-# Universal Editor - Asset Metadata Defaults
+# Universal Editor - Metadata Default Field (Data Type Renderer)
 
-This Universal Editor Extension implements a **custom field renderer** that:
+This Universal Editor Extension implements a **custom data type renderer** that:
 
 - Reads a **neighbor asset field** (e.g. `image`) from the currently selected editable (via `editorState`)
-- Fetches **AEM Author DAM metadata** for the selected asset (e.g. `dc:title`)
-- Auto-fills the current field (e.g. `imageAlt`) **only when** a **new asset is selected**
-  (or on the first asset selection event for a component).
+- Fetches **AEM Author DAM or Dynamic Media metadata** for the selected asset (e.g. `dc:title`)
+- Auto-fills the current field (e.g. `imageAlt`) **only when** a **new asset is selected** (or on the first asset selection event for a component).
   - It does **not** auto-fill merely because the field is empty (empty can be intentional).
+
+**Scope:** Built for **AEM (XWalk / Edge Delivery Services) authoring in Universal Editor** (AEM Author-backed content).  
+**Not a DA plugin:** This is **not intended for Document Authoring (DA / da.live Author Bus)**.
 
 ![Basic demo](docs/assets/basic-demo.gif)
 
@@ -21,7 +23,7 @@ This Universal Editor Extension implements a **custom field renderer** that:
 
 - Start the extension:
   - `aio app run`
-  
+
 > **🚨 IMPORTANT: Don't Skip This Step! 🚨**
 >
 > **On your first run, you _must_ accept the local development certificate, or Universal Editor will fail to load your extension.**
